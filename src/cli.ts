@@ -15,6 +15,12 @@ import {
   cmdListCards,
 } from "./commands/cards"
 import {
+  cmdMobileAccounts,
+  cmdMobileBalance,
+  cmdMobileLogin,
+  cmdMobileTransactions,
+} from "./commands/mobile"
+import {
   defaultValueDate,
   executePayment,
   type PaymentMode,
@@ -503,6 +509,136 @@ const cardsCommand = Command.make("cards").pipe(
   ])
 )
 
+// --- Mobile commands (experimental) ---
+
+const mobileOtpOption = Options.text("otp").pipe(
+  Options.withDescription("One-time code from the mKlik app"),
+  Options.optional
+)
+
+const mobileSerialOption = optionalText(
+  "serial",
+  "Token serial number (optional)"
+)
+
+const mobileLanguageOption = optionalText(
+  "language",
+  "Language code (default mk)"
+)
+
+function requiredMobileOption(
+  value: Option.Option<string>,
+  name: string
+): string {
+  if (Option.isSome(value) && value.value.trim()) {
+    return value.value
+  }
+  throw new CliError(EXIT_CODES.arguments, `--${name} is required.`)
+}
+
+function mobileCommandRun(
+  run: (profile: string) => Promise<unknown>,
+  validate?: () => void
+) {
+  return Effect.gen(function* () {
+    const { profile } = yield* rootCommand
+    yield* attempt(async () => {
+      validate?.()
+      console.log(JSON.stringify(await run(profile), null, 2))
+    })
+  })
+}
+
+const mobileLoginCommand = Command.make(
+  "login",
+  {
+    username: usernameOption,
+    otp: mobileOtpOption,
+    serial: mobileSerialOption,
+    language: mobileLanguageOption,
+  },
+  ({ username, otp, serial, language }) =>
+    Effect.gen(function* () {
+      const { profile, nonInteractive } = yield* rootCommand
+      if (nonInteractive) {
+        return yield* Effect.fail(
+          new CliError(
+            EXIT_CODES.arguments,
+            `Mobile login requires a one-time code. Run \`nlbcli --profile ${profile} mobile login\` without --non-interactive.`
+          )
+        )
+      }
+      yield* attempt(async () => {
+        const otpCode = requiredMobileOption(otp, "otp")
+        const user = Option.isSome(username)
+          ? username.value
+          : await prompt("Username: ")
+        await cmdMobileLogin(profile, {
+          language: optionText(language),
+          otp: otpCode,
+          serial: optionText(serial),
+          username: user,
+        })
+        console.error(`Mobile session saved for profile "${profile}".`)
+      })
+    })
+).pipe(Command.withDescription("EXPERIMENTAL: Log in to the mobile API"))
+
+const mobileAccountsCommand = Command.make(
+  "accounts",
+  { language: mobileLanguageOption },
+  ({ language }) =>
+    mobileCommandRun((profile) =>
+      cmdMobileAccounts(profile, optionText(language))
+    )
+).pipe(Command.withDescription("EXPERIMENTAL: List mobile API accounts"))
+
+const mobileBalanceCommand = Command.make(
+  "balance",
+  { id: accountIdArg, language: mobileLanguageOption },
+  ({ id, language }) =>
+    mobileCommandRun((profile) =>
+      cmdMobileBalance(profile, id, optionText(language))
+    )
+).pipe(Command.withDescription("EXPERIMENTAL: Show mobile API account balance"))
+
+const mobileTransactionsCommand = Command.make(
+  "transactions",
+  {
+    id: accountIdArg,
+    start: startOption,
+    end: endOption,
+    language: mobileLanguageOption,
+  },
+  ({ id, start, end, language }) => {
+    const dates = transactionDates(
+      Option.getOrUndefined(start),
+      Option.getOrUndefined(end)
+    )
+    return mobileCommandRun(
+      (profile) =>
+        cmdMobileTransactions(
+          profile,
+          id,
+          dates.start,
+          dates.end,
+          optionText(language)
+        ),
+      () => validateTransactionOptions(dates.start, dates.end, "json")
+    )
+  }
+).pipe(Command.withDescription("EXPERIMENTAL: List mobile API transactions"))
+
+const mobileCommand = Command.make("mobile").pipe(
+  Command.withDescription("EXPERIMENTAL: NLB mobile API commands"),
+  Command.withSubcommands([
+    mobileLoginCommand,
+    mobileAccountsCommand,
+    mobileBalanceCommand,
+    mobileTransactionsCommand,
+  ])
+)
+
 // --- Payment commands ---
 
 function makePaymentCommand(mode: PaymentMode) {
@@ -574,6 +710,7 @@ export const command = rootCommand.pipe(
     loginCommand,
     accountsCommand,
     cardsCommand,
+    mobileCommand,
     paymentsCommand,
   ])
 )
